@@ -90,7 +90,7 @@ void ImagePublisherNode::initializeParameters()
     this->declare_parameter("resize_height", 0);
     
     // 获取参数
-    image_folder_ = this->get_parameter("image_folder").as_string();
+    image_folder_ = this->get_parameter("image_folder").as_string(); #这里的.as_string()是获取参数的值，并将其转换为字符串类型
     loop_images_ = this->get_parameter("loop").as_bool();
     preload_images_ = this->get_parameter("preload_images").as_bool();
     use_compression_ = this->get_parameter("use_compression").as_bool();
@@ -133,6 +133,7 @@ void ImagePublisherNode::createPublishers()
  * @brief 打印节点信息
  *
  * 启动时输出图片文件夹、文件数量、发布频率、循环/预加载等配置，
+ * 还会就是否循环播放、是否预加载、缩放尺寸等参数，
  * 便于确认运行参数是否符合预期
  */
 void ImagePublisherNode::printNodeInfo()
@@ -176,7 +177,7 @@ bool ImagePublisherNode::loadImageFiles()
         for (const auto& entry : std::filesystem::directory_iterator(image_folder_)) {
             if (entry.is_regular_file()) {
                 std::string extension = entry.path().extension().string();
-                std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);
+                std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);  #转小写工程化的代码。。
                 
                 if (std::find(SUPPORTED_EXTENSIONS.begin(), SUPPORTED_EXTENSIONS.end(), extension) 
                     != SUPPORTED_EXTENSIONS.end()) {
@@ -184,7 +185,8 @@ bool ImagePublisherNode::loadImageFiles()
                 }
             }
         }
-    } catch (const std::filesystem::filesystem_error& ex) {
+    } 
+    catch (const std::filesystem::filesystem_error& ex) {
         RCLCPP_ERROR(this->get_logger(), "读取文件夹时出错: %s", ex.what());
         return false;
     }

@@ -9,12 +9,12 @@ namespace detect
  *
  * 模型输入输出说明（best.onnx）:
  *   - 输入: images  (1, 3, 640, 640) float32，RGB 归一化
- *   - 输出: output0 (1, 12, 8400) float32
+ *   - 输出: output0 (1, 5, 8400) float32
  *     - 8400 = 640/8^2 + 640/16^2 + 640/32^2 个锚点
  *     - 前 4 行: cx, cy, w, h（640 空间像素坐标）
- *     - 后 8 行: 8 个类别的概率（注意：此模型导出时已内置 sigmoid，
+ *     - 后 1 行: 装甲板类别的概率（注意：此模型导出时已内置 sigmoid，
  *       输出直接是 0~1 概率，不要再套 sigmoid）
- *   - 类别（装甲板数字）: 0, 1, 10, 3, 4, 6, 7, 9
+ *   - 类别: armor（只检测装甲板，不识别数字）
  */
 
 /**
@@ -27,31 +27,37 @@ DetectNode::DetectNode()
     : Node("detect_node")
 {
     // ---- 参数 ----
+    // declare_parameter: 声明 ROS 参数并给默认值，启动时可用
+    // --ros-args -p xxx:=yyy 或 launch 文件覆写
     std::string model_path = this->declare_parameter(
         "model_path",
         std::string("/home/baimi/rmdector/src/detect/armor-4/weights/best.onnx"));
-    conf_threshold_ = this->declare_parameter("conf_threshold", 0.25);
-    iou_threshold_ = this->declare_parameter("iou_threshold", 0.45);
-    input_size_ = this->declare_parameter("input_size", 640);
-    verbose_ = this->declare_parameter("verbose", false);
+    conf_threshold_ = this->declare_parameter("conf_threshold", 0.25);  // 置信度过滤阈值
+    iou_threshold_ = this->declare_parameter("iou_threshold", 0.45);    // NMS 去重阈值
+    input_size_ = this->declare_parameter("input_size", 640);           // 模型输入边长
+    verbose_ = this->declare_parameter("verbose", false);               // 是否打印每帧耗时
 
-    // 类别名与训练 data.yaml 一致
-    class_names_ = {"0", "1", "10", "3", "4", "6", "7", "9"};
+    // 类别名与训练 data.yaml 一致（单类：只检测装甲板，不识别数字）
+    // 注意：必须和模型输出行数匹配（4 坐标 + 1 类别 = 5 行）
+    class_names_ = {"armor"};
 
     // ---- 初始化 ONNX Runtime 会话 ----
     ort_env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "detect");
     Ort::SessionOptions session_options;
-    session_options.SetIntraOpNumThreads(4);  // CPU 推理线程数
+    session_options.SetIntraOpNumThreads(4);  // CPU 推理线程数（ONNX Runtime 内部并行）
+    // 加载模型文件；失败会直接抛异常，节点起不来
     session_ = std::make_unique<Ort::Session>(*ort_env_, model_path.c_str(), session_options);
 
     // ---- 创建订阅者和发布者 ----
     // 同时订阅原始图和压缩图：image_publisher 只会发其中一个，另一个收不到数据不影响
+    // 队列深度 1：图像只处理最新一帧，丢旧帧保实时性
     image_sub_ = this->create_subscription<sensor_msgs::msg::Image>(
         "/sensor_img", 1,
         std::bind(&DetectNode::imageCallback, this, std::placeholders::_1));
     compressed_sub_ = this->create_subscription<sensor_msgs::msg::CompressedImage>(
         "/sensor_img/compressed", 1,
         std::bind(&DetectNode::compressedImageCallback, this, std::placeholders::_1));
+    // /detect/image: 画好框的图像；/detect/detections: 结构化检测结果
     result_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/detect/image", 1);
     detection_pub_ = this->create_publisher<detect::msg::DetectionArray>("/detect/detections", 1);
 
@@ -105,46 +111,49 @@ void DetectNode::compressedImageCallback(const sensor_msgs::msg::CompressedImage
 void DetectNode::processFrame(const cv::Mat& frame, const rclcpp::Time& stamp,
                               const std::string& frame_id)
 {
+    // 记录处理耗时：从收到帧到发布结果的总时间
     auto t0 = std::chrono::steady_clock::now();
 
-    // 1. 预处理（letterbox）
+    // 1. 预处理（letterbox）：等比缩放 + 灰边填充到 640x640
+    //    scale/pad 记录变换参数，供第 3 步把检测框映射回原图坐标
     float scale;
     int pad_x, pad_y;
     cv::Mat input = letterbox(frame, scale, pad_x, pad_y);
 
-    // 2. 推理
+    // 2. 推理：ONNX Runtime 前向传播，得到原始输出张量
     std::vector<float> output;
     infer(input, output);
 
     // 3. 后处理（解码 + NMS），得到原图像素坐标的检测框
     auto detections = postprocess(output, scale, pad_x, pad_y, frame.cols, frame.rows);
 
-    // 4. 画框
+    // 4. 画框：在副本上画（不污染原图数据）
     cv::Mat annotated = frame.clone();
     drawBoxes(annotated, detections);
 
-    // 5. 发布画框图像
+    // 5. 发布画框图像：cv::Mat 转成 sensor_msgs/Image 消息（bgr8 编码）
     cv_bridge::CvImage cv_image(std_msgs::msg::Header(), "bgr8", annotated);
     result_pub_->publish(*cv_image.toImageMsg());
 
-    // 6. 发布结构化检测结果
+    // 6. 发布结构化检测结果：把内存里的 Detection 逐个转成 ROS 消息
+    //    供下游决策使用（如瞄准、跟踪），避免下游再解析图像
     detect::msg::DetectionArray array_msg;
     array_msg.header.stamp = stamp;
     array_msg.header.frame_id = frame_id;
     for (const auto& d : detections) {
         detect::msg::Detection det_msg;
-        det_msg.class_id = d.class_id;
-        det_msg.class_name = class_names_[d.class_id];
-        det_msg.confidence = d.confidence;
-        det_msg.x = d.box.x;
-        det_msg.y = d.box.y;
-        det_msg.width = d.box.width;
-        det_msg.height = d.box.height;
+        det_msg.class_id = d.class_id;                    // 类别索引
+        det_msg.class_name = class_names_[d.class_id];    // 类别名字符串
+        det_msg.confidence = d.confidence;                // 置信度
+        det_msg.x = d.box.x;                              // 框左上角 x
+        det_msg.y = d.box.y;                              // 框左上角 y
+        det_msg.width = d.box.width;                      // 框宽
+        det_msg.height = d.box.height;                    // 框高
         array_msg.detections.push_back(det_msg);
     }
     detection_pub_->publish(array_msg);
 
-    // 7. 日志
+    // 7. 日志：打印目标数量和耗时，方便调试
     auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                   std::chrono::steady_clock::now() - t0).count();
     RCLCPP_INFO(this->get_logger(), "检测到 %zu 个目标, 耗时 %ld ms",
@@ -215,7 +224,7 @@ void DetectNode::infer(const cv::Mat& input, std::vector<float>& output)
 /**
  * @brief 后处理：解码候选框 + 阈值过滤 + NMS，坐标映射回原图
  *
- * 输出布局 (1, 12, 8400)：行 0~3 是 cx,cy,w,h，行 4~11 是 8 个类别得分。
+ * 输出布局 (1, 5, 8400)：行 0~3 是 cx,cy,w,h，行 4 是装甲板类别得分。
  * 三步流程：
  *   1. 解码所有候选框，取每个锚点得分最高的类别，低于 conf_threshold_ 的过滤；
  *   2. 按置信度降序排列，便于 NMS 依次贪心抑制；
@@ -232,7 +241,7 @@ std::vector<Detection> DetectNode::postprocess(const std::vector<float>& output,
                                                float scale, int pad_x, int pad_y,
                                                int orig_w, int orig_h)
 {
-    // 输出布局 (1, 12, 8400)：行 0~3 是 cx,cy,w,h，行 4~11 是 8 个类别得分
+    // 输出布局 (1, 5, 8400)：行 0~3 是 cx,cy,w,h，行 4 是装甲板类别得分
     const int num_classes = static_cast<int>(class_names_.size());
     const int num_anchors = static_cast<int>(output.size() / (4 + num_classes));
 
