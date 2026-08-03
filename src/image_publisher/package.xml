@@ -1,0 +1,33 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>image_publisher</name>
+  <version>1.0.0</version>
+  <description>
+    一个ROS 2包，用于从指定文件夹读取图像并发布到ROS话题。
+    支持多种图像格式、循环播放、图像压缩、预加载等功能。
+  </description>
+  <maintainer email="fourzkw@example.com">fourzkw</maintainer>
+  <license>Apache-2.0</license>
+  <author email="fourzkw@example.com">fourzkw</author>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+
+  <!-- ROS 2 依赖 -->
+  <depend>rclcpp</depend>
+  <depend>sensor_msgs</depend>
+  <depend>std_msgs</depend>
+  <depend>cv_bridge</depend>
+  <depend>image_transport</depend>
+  
+  <!-- OpenCV 依赖 -->
+  <depend>opencv2</depend>
+
+  <!-- 测试依赖 -->
+  <test_depend>ament_lint_auto</test_depend>
+  <test_depend>ament_lint_common</test_depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package> 

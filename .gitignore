@@ -1,0 +1,9 @@
+build/
+install/
+log/
+.vscode/
+__pycache__/
+*.pyc
+
+# 模型权重文件（大文件，用 Git LFS 或不提交）
+src/detect/armor-4/weights/
