@@ -173,14 +173,18 @@ void DetectNode::processFrame(const cv::Mat& frame, const rclcpp::Time& stamp,
  */
 cv::Mat DetectNode::letterbox(const cv::Mat& src, float& scale, int& pad_x, int& pad_y)
 {
-    // 等比缩放使长边=输入尺寸，短边方向用灰色(114)填充，保持图像比例不变
+    // 等比缩放：取两个方向缩放比例的较小值，保证长边恰好 = input_size_
+    //（比如 1280x768 图，scale = 640/1280 = 0.5，高变为 384）
     scale = std::min(static_cast<float>(input_size_) / src.cols,
                      static_cast<float>(input_size_) / src.rows);
     int new_w = static_cast<int>(std::round(src.cols * scale));
     int new_h = static_cast<int>(std::round(src.rows * scale));
+    // 填充量：短边方向两侧各留 (input_size_ - 新尺寸) / 2 的灰边
     pad_x = (input_size_ - new_w) / 2;
     pad_y = (input_size_ - new_h) / 2;
 
+    // 建 640x640 灰色画布（RGB 都是 114，与 YOLO 训练时的填充值一致），
+    // 缩放后的图放到画布中央，其余区域保持灰色
     cv::Mat resized, canvas(input_size_, input_size_, CV_8UC3, cv::Scalar(114, 114, 114));
     cv::resize(src, resized, cv::Size(new_w, new_h));
     resized.copyTo(canvas(cv::Rect(pad_x, pad_y, new_w, new_h)));
@@ -197,25 +201,31 @@ cv::Mat DetectNode::letterbox(const cv::Mat& src, float& scale, int& pad_x, int&
  */
 void DetectNode::infer(const cv::Mat& input, std::vector<float>& output)
 {
-    // HWC BGR 8UC3 -> NCHW float32（swapRB 完成 BGR->RGB，并归一化到 0~1）
+    // 图像格式转换：HWC BGR 8UC3 → NCHW float32
+    // blobFromImage 参数: 缩放系数 1/255（归一化）、无缩放尺寸、无均值、
+    // swapRB=true（BGR→RGB，模型是按 RGB 训练的）
     cv::Mat blob = cv::dnn::blobFromImage(input, 1.0 / 255.0, cv::Size(), cv::Scalar(), true);
 
-    // 创建输入张量并运行会话
+    // 创建输入张量：把 blob 的数据指针包成 ONNX 张量
+    // 注意只是"借用"blob 的内存，blob 必须活到 Run 结束（作用域内没问题）
     Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
     std::vector<int64_t> shape = {1, 3, input_size_, input_size_};
     Ort::Value input_value = Ort::Value::CreateTensor<float>(
         mem_info, reinterpret_cast<float*>(blob.data), blob.total(), shape.data(), shape.size());
 
-    // 保持名字字符串存活，避免悬垂指针
+    // 获取模型输入/输出节点的名字（onnx 里的 "images" 和 "output0"）
+    // GetInputNameAllocated 返回智能指针：名字字符串由 ORT 分配，
+    // 必须先保存到局部变量再取 .get()，否则悬垂指针
     auto input_name = session_->GetInputNameAllocated(0, allocator_);
     auto output_name = session_->GetOutputNameAllocated(0, allocator_);
     std::array<const char*, 1> input_names{input_name.get()};
     std::array<const char*, 1> output_names{output_name.get()};
+    // 执行前向传播：输入 1 个张量，输出 1 个张量
     auto results = session_->Run(Ort::RunOptions{nullptr},
                                  input_names.data(), &input_value, 1,
                                  output_names.data(), 1);
 
-    // 拷贝输出张量
+    // 把结果从 ORT 张量拷贝到 std::vector（类型转换 + 连续内存）
     size_t num_elements = results[0].GetTensorTypeAndShapeInfo().GetElementCount();
     output.resize(num_elements);
     std::memcpy(output.data(), results[0].GetTensorData<float>(), num_elements * sizeof(float));
@@ -241,11 +251,16 @@ std::vector<Detection> DetectNode::postprocess(const std::vector<float>& output,
                                                float scale, int pad_x, int pad_y,
                                                int orig_w, int orig_h)
 {
-    // 输出布局 (1, 5, 8400)：行 0~3 是 cx,cy,w,h，行 4 是装甲板类别得分
+    // 输出布局 (1, 5, 8400)：行 0~3 是 cx,cy,w,h，行 4 是装甲板类别得分。
+    // 8400 个锚点按 3 个尺度排布：大网格(80x80=6400, 小目标)
+    // + 中网格(40x40=1600) + 小网格(20x20=400, 大目标)。
+    // 每个锚点存 5 个数字：位置(4) + 类别得分(1)
     const int num_classes = static_cast<int>(class_names_.size());
     const int num_anchors = static_cast<int>(output.size() / (4 + num_classes));
 
     // 第一步：解码所有候选框，过滤低置信度
+    // 内存布局是"按行存"的：同一行(如第4行得分)的 8400 个数连续排列，
+    // 所以取第 i 个锚点的第 c 类得分要用 output[(4+c)*num_anchors + i]
     struct Candidate
     {
         float cx, cy, w, h, score;
@@ -253,6 +268,7 @@ std::vector<Detection> DetectNode::postprocess(const std::vector<float>& output,
     };
     std::vector<Candidate> candidates;
     for (int i = 0; i < num_anchors; ++i) {
+        // 取该锚点在所有类别里的最高得分及对应类别
         float max_score = 0.0f;
         int best_class = 0;
         for (int c = 0; c < num_classes; ++c) {
@@ -264,11 +280,14 @@ std::vector<Detection> DetectNode::postprocess(const std::vector<float>& output,
         }
         // 此模型的输出已内置 sigmoid，得分直接就是置信度（0~1）
         // 启发判断：得分落在 [0,1] 视为概率直接用；否则当作 logits 再套 sigmoid
+        // （防御性代码：防止换了没内置 sigmoid 的模型后结果全错）
         float confidence = (max_score >= 0.0f && max_score <= 1.0f) ? max_score
                             : 1.0f / (1.0f + std::exp(-max_score));
+        // 置信度低于阈值直接丢弃（调低阈值可提高召回，但误检增多）
         if (confidence < conf_threshold_)
             continue;
 
+        // 保存候选：框中心 + 宽高（640 空间坐标）+ 得分 + 类别
         candidates.push_back({
             output[0 * num_anchors + i],
             output[1 * num_anchors + i],
@@ -280,21 +299,25 @@ std::vector<Detection> DetectNode::postprocess(const std::vector<float>& output,
     }
 
     // 第二步：按置信度降序排列，便于 NMS 依次贪心抑制
+    // （高置信度的框先被保留，低置信度且重叠的框被它压掉）
     std::sort(candidates.begin(), candidates.end(),
               [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
 
     // 第三步：类内 NMS，并把框从 640 空间映射回原图
+    // NMS = 同一目标周围会有多个重叠框，只保留得分最高的那个
     std::vector<Detection> results;
-    std::vector<bool> suppressed(candidates.size(), false);
+    std::vector<bool> suppressed(candidates.size(), false);  // 标记被抑制的框
     for (size_t i = 0; i < candidates.size(); ++i) {
         if (suppressed[i])
             continue;
         const auto& c = candidates[i];
+        // 坐标还原：640 空间 → 原图
+        // (640 坐标 - 填充) / 缩放比例 = 原图坐标（letterbox 的逆变换）
         float x1 = (c.cx - c.w / 2 - pad_x) / scale;
         float y1 = (c.cy - c.h / 2 - pad_y) / scale;
         float x2 = (c.cx + c.w / 2 - pad_x) / scale;
         float y2 = (c.cy + c.h / 2 - pad_y) / scale;
-        // 裁剪到图像范围内
+        // 裁剪到图像范围内，防止框超出画面
         x1 = std::max(0.0f, x1); y1 = std::max(0.0f, y1);
         x2 = std::min(static_cast<float>(orig_w), x2);
         y2 = std::min(static_cast<float>(orig_h), y2);
@@ -303,11 +326,13 @@ std::vector<Detection> DetectNode::postprocess(const std::vector<float>& output,
                            cv::Rect(static_cast<int>(x1), static_cast<int>(y1),
                                     static_cast<int>(x2 - x1), static_cast<int>(y2 - y1))});
 
+        // 把与当前框同类别、且 IoU 超过阈值的后续框全部抑制
         for (size_t j = i + 1; j < candidates.size(); ++j) {
             if (suppressed[j] || candidates[j].class_id != c.class_id)
                 continue;
             const auto& d = candidates[j];
-            // 两个框在 640 空间下的 IoU
+            // IoU = 两框交集面积 / 两框并集面积，衡量重叠程度
+            // 两个框在 640 空间下的 IoU（相对缩放，映射前后 IoU 不变）
             float ix1 = std::max(c.cx - c.w / 2, d.cx - d.w / 2);
             float iy1 = std::max(c.cy - c.h / 2, d.cy - d.h / 2);
             float ix2 = std::min(c.cx + c.w / 2, d.cx + d.w / 2);
@@ -332,14 +357,17 @@ void DetectNode::drawBoxes(cv::Mat& frame, const std::vector<Detection>& detecti
 {
     for (const auto& d : detections) {
         cv::Scalar color(0, 255, 0);  // 绿色框
-        cv::rectangle(frame, d.box, color, 2);
+        cv::rectangle(frame, d.box, color, 2);  // 画矩形框，线宽 2px
 
-        // 标签: "10 0.87"
+        // 标签: "armor 87%"（类别名 + 置信度百分比）
         std::string label = class_names_[d.class_id] + " " +
                             std::to_string(static_cast<int>(d.confidence * 100)) + "%";
         int baseline;
+        // 测量文字大小，决定背景色块的尺寸（避免文字被框遮挡）
         cv::Size text_size = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+        // 文字放在框的上方（离顶部太近时下移，避免超出画面）
         cv::Point text_origin(d.box.x, std::max(d.box.y - 5, text_size.height));
+        // 先画深色背景块，再写白字，保证文字在任何背景下都清晰
         cv::rectangle(frame, cv::Rect(text_origin, text_size + cv::Size(4, baseline)),
                       color, cv::FILLED);
         cv::putText(frame, label, text_origin + cv::Point(2, text_size.height - 2),
