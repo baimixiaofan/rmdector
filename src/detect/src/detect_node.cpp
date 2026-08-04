@@ -225,35 +225,52 @@ cv::Mat DetectNode::letterbox(const cv::Mat& src, float& scale, int& pad_x, int&
 // ======================================================================
 void DetectNode::infer(const cv::Mat& input, std::vector<float>& output)
 {
-    // 1. 格式转换：HWC BGR 8UC3 → NCHW float32
-    //    blobFromImage 参数：归一化 1/255、不缩放、无均值、swapRB=true（BGR→RGB，
-    //    模型按 RGB 训练）
+    // ---------- 1. 把图像改成模型认识的样子 ----------/
+    // cv::dnn::blobFromImage：一步把"宽x高x3通道的 BGR 图像"变成"1张x3通道x640x640 的 float 数组"
+    // 参数从右往左看：
+    //   true          → 交换 B 和 R 通道（BGR 变 RGB），因为模型是按 RGB 训练的
+    //   cv::Scalar()  → 不减去均值
+    //   cv::Size()    → 不做额外缩放（letterbox 已经缩放好了）
+    //   1.0/255.0     → 每个像素值除以 255，把 0~255 归一化成 0~1
+    // 返回的 blob 是一个 4 维 float 数组（NCHW），但底层内存是连续的一长串数
     cv::Mat blob = cv::dnn::blobFromImage(input, 1.0 / 255.0, cv::Size(), cv::Scalar(), true);
 
-    // 2. 把 blob 包装成 ONNX 输入张量
-    //    注意只是借用 blob 的内存，blob 必须存活到 Run 结束（本函数作用域内没问题）
+    // ---------- 2. 把 blob 包装成 ONNX Runtime 认识的样子 ----------
+    // 告诉 ORT：数据存在普通 CPU 内存里（不是显卡显存）
     Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    // 声明张量的形状：1 张图、3 个通道、宽 input_size_、高 input_size_（即 1, 3, 640, 640）
     const std::vector<int64_t> input_shape = {1, 3, input_size_, input_size_};
+    // CreateTensor：把 blob 那段连续内存"包"成一个 ONNX 张量对象
+    // 注意：没有复制数据，只是把指针递进去借用；blob 必须活到 Run 执行完
     Ort::Value input_value = Ort::Value::CreateTensor<float>(
         mem_info, reinterpret_cast<float*>(blob.data), blob.total(),
         input_shape.data(), input_shape.size());
 
-    // 3. 获取模型输入 / 输出节点的名字（onnx 里的 "images" 和 "output0"）
-    //    GetInputNameAllocated 返回智能指针：名字由 ORT 分配，
-    //    必须先保存到局部变量再取 .get()，否则悬垂指针
+    // ---------- 3. 问模型要输入/输出的名字 ----------
+    // 模型文件里给输入节点起的名字是 "images"，输出节点是 "output0"，
+    // 但代码不硬编码，直接问 ORT 要（0 号输入/输出就是唯一的那个）
     auto input_name = session_->GetInputNameAllocated(0, allocator_);
+    // 同上，要输出节点名字；返回的是智能指针，名字内存由 ORT 管理
     auto output_name = session_->GetOutputNameAllocated(0, allocator_);
+    // Run 需要的参数是 const char* 数组，这里把智能指针里的名字指针取出来装进数组
+    // 之所以要先保存 input_name/output_name 再取 .get()，是因为智能指针销毁名字就没了
     const std::array<const char*, 1> input_names{input_name.get()};
     const std::array<const char*, 1> output_names{output_name.get()};
 
-    // 4. 前向传播：输入 1 个张量，输出 1 个张量
+    // ---------- 4. 真正跑模型 ----------
+    // Run 就是"前向传播"：把输入张量喂进模型，算出输出张量
+    // 参数依次是：运行选项（用默认）、输入名字数组、输入张量指针、输入个数、输出名字数组、输出个数
     auto results = session_->Run(Ort::RunOptions{nullptr},
                                  input_names.data(), &input_value, 1,
                                  output_names.data(), 1);
 
-    // 5. 把结果从 ORT 张量拷贝到 std::vector（连续内存，方便后续访问）
+    // ---------- 5. 把结果从 ORT 张量拷到 std::vector ----------
+    // 问结果张量一共有多少个元素（1 * 5 * 8400 = 42000 个 float）
     const size_t num_elements = results[0].GetTensorTypeAndShapeInfo().GetElementCount();
+    // 把 output 数组扩到能装下 42000 个 float
     output.resize(num_elements);
+    // 内存拷贝：从 ORT 张量的数据指针，原样复制 42000*4 字节到 output 里
+    // 之后就完全脱离 ORT，可以像普通数组一样访问了
     std::memcpy(output.data(), results[0].GetTensorData<float>(), num_elements * sizeof(float));
 }
 
