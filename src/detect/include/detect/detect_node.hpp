@@ -117,6 +117,15 @@ private:
      */
     void drawBoxes(cv::Mat& frame, const std::vector<Detection>& detections);
 
+    /**
+     * @brief 把检测结果转换成 ROS 消息并发布到 /detect/detections
+     * @param detections 检测结果列表
+     * @param stamp   消息时间戳
+     * @param frame_id 消息坐标系/帧 id
+     */
+    void publishDetectionResults(const std::vector<Detection>& detections,
+                                 const rclcpp::Time& stamp, const std::string& frame_id);
+
     // ROS 接口
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;             ///< 原始图像订阅者
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_sub_; ///< 压缩图像订阅者
