@@ -74,6 +74,17 @@ float intersectionOverUnion(const Candidate& a, const Candidate& b)
     return inter_area / union_area;
 }
 
+/**
+ * @brief 比较两个候选框的置信度（sort 排序用）
+ *
+ * 返回 true 表示 a 应该排在 b 前面。
+ * 规则：得分高的排前面（降序）。
+ */
+bool scoreHigher(const Candidate& a, const Candidate& b)
+{
+    return a.score > b.score;
+}
+
 } // namespace
 
 // ======================================================================
@@ -237,14 +248,21 @@ void DetectNode::infer(const cv::Mat& input, std::vector<float>& output)
 
     // ---------- 2. 把 blob 包装成 ONNX Runtime 认识的样子 ----------
     // 告诉 ORT：数据存在普通 CPU 内存里（不是显卡显存）
-    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+    Ort::MemoryInfo mem_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);//cpu推理直接用这两个参数即可，除非你需要手动管理
     // 声明张量的形状：1 张图、3 个通道、宽 input_size_、高 input_size_（即 1, 3, 640, 640）
     const std::vector<int64_t> input_shape = {1, 3, input_size_, input_size_};
-    // CreateTensor：把 blob 那段连续内存"包"成一个 ONNX 张量对象
+    // CreateTensor：把 blob 7那段连续内存"包"成一个 ONNX 张量对象
     // 注意：没有复制数据，只是把指针递进去借用；blob 必须活到 Run 执行完
     Ort::Value input_value = Ort::Value::CreateTensor<float>(
         mem_info, reinterpret_cast<float*>(blob.data), blob.total(),
-        input_shape.data(), input_shape.size());
+         input_shape.data(), input_shape.size());
+// Ort::Value::CreateTensor<float>(
+//     mem_info,                              // ① 内存说明书（CPU 内存）
+//     reinterpret_cast<float*>(blob.data),   // ② 数据首地址指针
+//     blob.total(),                          // ③ 元素总数（1228800 个 float）
+//     input_shape.data(),                    // ④ 形状数组 {1,3,640,640}
+//     input_shape.size());                   // ⑤ 维度数（4）
+// 5 个参数：放哪 → 在哪 → 多少 → 形状 → 几维。
 
     // ---------- 3. 问模型要输入/输出的名字 ----------
     // 模型文件里给输入节点起的名字是 "images"，输出节点是 "output0"，
@@ -285,8 +303,8 @@ std::vector<Detection> DetectNode::postprocess(const std::vector<float>& output,
     //   行 0~3: cx, cy, w, h（640 空间的像素坐标）
     //   行 4  : 类别得分
     //   8400 = 80x80 + 40x40 + 20x20 三个尺度的锚点数量（大网格测小目标）
-    const int num_classes = static_cast<int>(class_names_.size());
-    const int num_anchors = static_cast<int>(output.size() / (4 + num_classes));
+    const int num_classes = static_cast<int>(class_names_.size());  //类别名称的个数
+    const int num_anchors = static_cast<int>(output.size() / (4 + num_classes));  //计算锚点数量
 
     // ---- 第一步：解码所有候选框，过滤低置信度 ----
     // 输出按"行"连续存储：第 i 个锚点的第 c 类得分位于 output[(4 + c) * num_anchors + i]
@@ -318,12 +336,13 @@ std::vector<Detection> DetectNode::postprocess(const std::vector<float>& output,
             confidence,
             best_class,
         });
-    }
+    }//这里就是在找出一个锚点置信度最高的类，然后这个最高的类如果置信度也低就直接丢掉
+
 
     // ---- 第二步：按置信度降序排列 ----
     // 高置信度框先被保留，与它重叠的低置信度框被它压掉
-    std::sort(candidates.begin(), candidates.end(),
-              [](const Candidate& a, const Candidate& b) { return a.score > b.score; });
+    // 排序规则见 scoreHigher：得分高的排前面
+    std::sort(candidates.begin(), candidates.end(), scoreHigher);
 
     // ---- 第三步：类内 NMS，确定要保留的候选 ----
     // 同一目标周围会产生多个重叠框，NMS 只保留得分最高的那个
