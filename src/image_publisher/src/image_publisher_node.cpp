@@ -89,8 +89,8 @@ void ImagePublisherNode::initializeParameters()
     this->declare_parameter("resize_width", 0);
     this->declare_parameter("resize_height", 0);
     
-    // 获取参数
-    image_folder_ = this->get_parameter("image_folder").as_string(); #这里的.as_string()是获取参数的值，并将其转换为字符串类型
+    // 获取参数（.as_string() 是获取参数的值，并将其转换为字符串类型）
+    image_folder_ = this->get_parameter("image_folder").as_string();
     loop_images_ = this->get_parameter("loop").as_bool();
     preload_images_ = this->get_parameter("preload_images").as_bool();
     use_compression_ = this->get_parameter("use_compression").as_bool();
@@ -177,7 +177,7 @@ bool ImagePublisherNode::loadImageFiles()
         for (const auto& entry : std::filesystem::directory_iterator(image_folder_)) {
             if (entry.is_regular_file()) {
                 std::string extension = entry.path().extension().string();
-                std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);  #转小写工程化的代码。。
+                std::transform(extension.begin(), extension.end(), extension.begin(), ::tolower);  // 转小写，统一扩展名比较
                 
                 if (std::find(SUPPORTED_EXTENSIONS.begin(), SUPPORTED_EXTENSIONS.end(), extension) 
                     != SUPPORTED_EXTENSIONS.end()) {

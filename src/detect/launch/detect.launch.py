@@ -45,6 +45,11 @@ def generate_launch_description():
         default_value='0.45',
         description='NMS IoU 阈值'
     )
+    save_dir_arg = DeclareLaunchArgument(
+        'save_dir',
+        default_value='~/rmdector/detect_results',
+        description='检测结果保存文件夹（空 = 不保存）'
+    )
 
     detect_node = Node(
         package='detect',
@@ -56,6 +61,7 @@ def generate_launch_description():
             'model_path': LaunchConfiguration('model_path'),
             'conf_threshold': LaunchConfiguration('conf_threshold'),
             'iou_threshold': LaunchConfiguration('iou_threshold'),
+            'save_dir': LaunchConfiguration('save_dir'),
             # 相机标定与坐标变换参数（默认值取自 26 赛季培训说明）
             'armor_type': 7,
             'camera_fx': 1462.3697,
@@ -90,6 +96,7 @@ def generate_launch_description():
         model_path_arg,
         conf_arg,
         iou_arg,
+        save_dir_arg,
         startup_log,
         detect_node,
     ])

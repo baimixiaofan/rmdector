@@ -40,8 +40,8 @@ def generate_launch_description():
     
     loop_arg = DeclareLaunchArgument(
         'loop',
-        default_value='true',
-        description='是否循环播放图片（true/false）'
+        default_value='false',
+        description='是否循环播放图片（true/false）；默认 false 表示全部发一遍后自动退出'
     )
     
     preload_images_arg = DeclareLaunchArgument(

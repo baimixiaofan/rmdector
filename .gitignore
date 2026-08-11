@@ -10,4 +10,7 @@ src/detect/armor-4/weights/
 
 # 培训说明文档（内部资料，不提交仓库）
 src/detect/26赛季视觉基础培训说明/
+
+# 检测结果输出文件夹
+detect_results/
 AGENTS.md

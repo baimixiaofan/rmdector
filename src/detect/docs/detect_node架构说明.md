@@ -44,10 +44,11 @@ processFrame()                  ★ 核心流水线，一帧图从头走到尾
   │  ├─ ⑤ drawBoxes() + drawRobotPosition()  在副本上画绿框和坐标文字
   │  ├─ ⑥ 发布画框图        /detect/image
   │  ├─ ⑦ publishDetectionResults()   → /detect/detections
-  │  └─ ⑧ publishAimInfo()            → /aim_target
+  │  ├─ ⑧ publishAimInfo()            → /aim_target
+  │  └─ ⑨ saveResults()    （可选）把画框图 + CSV 汇总存到 save_dir
 ```
 
-**全文件有 13 个函数**，其中真正要理解的是 `processFrame` 和它的子函数（①②③④），其余都是模板/辅助。
+**全文件有 14 个函数**，其中真正要理解的是 `processFrame` 和它的子函数（①②③④），其余都是模板/辅助。
 
 ---
 
@@ -305,6 +306,7 @@ struct Detection {
 | `cam_to_robot_x/y/z` | 0.08 / 0.0 / 0.05 | 相机在机器人系中的平移（米） |
 | `cam_to_robot_roll/pitch/yaw` | 0 / 60 / 20 | 相机相对机器人的旋转（度） |
 | `armor_type` | 7 | 装甲板图案类型 |
+| `save_dir` | 空 | 非空时把画框图（frame_N.png）和汇总（results.csv）保存到该文件夹 |
 
 **坐标系约定（重要，面试可能问）**：
 - 相机坐标系（OpenCV/PnP 输出）：x 右，y 下，z 前

@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 
 namespace detect
 {
@@ -138,6 +139,7 @@ DetectNode::DetectNode()
     iou_threshold_ = this->declare_parameter("iou_threshold", 0.45);    // NMS 去重阈值
     input_size_ = this->declare_parameter("input_size", 640);           // 模型输入边长
     verbose_ = this->declare_parameter("verbose", false);               // 是否打印每帧耗时
+    save_dir_ = this->declare_parameter("save_dir", std::string(""));   // 结果保存文件夹（空=不保存）
 
     // 类别名需与训练 data.yaml 一致，行数必须匹配模型输出（4 坐标 + 1 类别）
     class_names_ = {"armor"};
@@ -210,6 +212,17 @@ DetectNode::DetectNode()
     detection_pub_ = this->create_publisher<detect::msg::DetectionArray>("/detect/detections", 1);
     aim_pub_ = this->create_publisher<aim_interfaces::msg::AimInfo>("/aim_target", 1);
 
+    // ---- 4. 结果保存：建目录 + 打开汇总 CSV（save_dir 为空则跳过）----
+    if (!save_dir_.empty()) {
+        std::filesystem::create_directories(save_dir_);
+        results_file_.open(save_dir_ + "/results.csv", std::ios::out | std::ios::trunc);
+        if (results_file_.is_open()) {
+            // CSV 表头：帧号, 检测数, 类别, 置信度, 框x, 框y, 框w, 框h, 机器人x(mm), 机器人y(mm), 机器人z(mm)
+            results_file_ << "frame,count,class,confidence,x,y,w,h,robot_x_mm,robot_y_mm,robot_z_mm\n";
+        }
+        RCLCPP_INFO(this->get_logger(), "检测结果将保存到: %s", save_dir_.c_str());
+    }
+
     RCLCPP_INFO(this->get_logger(),
                 "检测节点已启动, 订阅 /sensor_img, 发布 /detect/image、/detect/detections 和 /aim_target");
 }
@@ -280,8 +293,11 @@ void DetectNode::processFrame(const cv::Mat& frame, const rclcpp::Time& stamp,
         drawRobotPosition(annotated, position_robot, detections[0].box);
     }
 
-    // ---- 6. 发布画框图像 ----
-    cv_bridge::CvImage cv_image(std_msgs::msg::Header(), "bgr8", annotated);
+    // ---- 6. 发布画框图像（沿用原图时间戳与坐标系，方便下游同步）----
+    std_msgs::msg::Header image_header;
+    image_header.stamp = stamp;
+    image_header.frame_id = frame_id;
+    cv_bridge::CvImage cv_image(image_header, "bgr8", annotated);
     result_pub_->publish(*cv_image.toImageMsg());
 
     // ---- 7. 发布结构化检测结果（供下游瞄准 / 决策使用） ----
@@ -289,6 +305,11 @@ void DetectNode::processFrame(const cv::Mat& frame, const rclcpp::Time& stamp,
 
     // ---- 8. 发布瞄准目标信息（机器人坐标系坐标 + 图案类型） ----
     publishAimInfo(detections, solved, position_robot);
+
+    // ---- 8.5 保存检测结果到文件夹（供离线检查，save_dir 为空则跳过）----
+    if (!save_dir_.empty()) {
+        saveResults(annotated, detections, solved, position_robot);
+    }
 
     // ---- 9. 按参数决定是否打印每帧耗时 ----
     if (verbose_) {
@@ -654,6 +675,38 @@ void DetectNode::publishAimInfo(const std::vector<Detection>& detections,
     }
 
     aim_pub_->publish(aim_msg);
+}
+
+// ======================================================================
+// 保存检测结果：画框图像 + 汇总 CSV
+// ======================================================================
+void DetectNode::saveResults(const cv::Mat& annotated,
+                             const std::vector<Detection>& detections,
+                             bool solved, const cv::Point3f& position_robot)
+{
+    // 帧号从 1 开始递增，作为文件名编号，保证保存顺序与播放顺序一致
+    ++frame_counter_;
+    const std::string prefix = save_dir_ + "/frame_" +
+                               std::to_string(frame_counter_);
+
+    // ---- 1. 保存画框图像 ----
+    cv::imwrite(prefix + ".png", annotated);
+
+    // ---- 2. 追加一行汇总记录到 CSV ----
+    if (!results_file_.is_open()) {
+        return;
+    }
+    results_file_ << frame_counter_ << "," << detections.size() << ","
+                  << class_names_[detections.empty() ? 0 : detections[0].class_id] << ","
+                  << (detections.empty() ? 0.0f : detections[0].confidence) << ","
+                  << (detections.empty() ? 0 : detections[0].box.x) << ","
+                  << (detections.empty() ? 0 : detections[0].box.y) << ","
+                  << (detections.empty() ? 0 : detections[0].box.width) << ","
+                  << (detections.empty() ? 0 : detections[0].box.height) << ","
+                  << (solved ? static_cast<int>(std::round(position_robot.x * 1000.0)) : 0) << ","
+                  << (solved ? static_cast<int>(std::round(position_robot.y * 1000.0)) : 0) << ","
+                  << (solved ? static_cast<int>(std::round(position_robot.z * 1000.0)) : 0) << "\n";
+    results_file_.flush();
 }
 
 } // namespace detect

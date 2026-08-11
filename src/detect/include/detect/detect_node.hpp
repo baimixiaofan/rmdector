@@ -8,6 +8,7 @@
 #include <opencv2/opencv.hpp>
 #include <onnxruntime_cxx_api.h>
 #include <chrono>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -160,6 +161,16 @@ private:
     void publishAimInfo(const std::vector<Detection>& detections,
                         bool solved, const cv::Point3f& position_robot);
 
+    /**
+     * @brief 把画框图像和检测结果保存到 save_dir_ 文件夹（供离线检查识别效果）
+     * @param annotated      画框后的图像
+     * @param detections     检测结果列表
+     * @param solved         本帧是否成功解算出坐标
+     * @param position_robot 解算出的机器人坐标系坐标（米）
+     */
+    void saveResults(const cv::Mat& annotated, const std::vector<Detection>& detections,
+                     bool solved, const cv::Point3f& position_robot);
+
     // ROS 接口
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;             ///< 原始图像订阅者
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_sub_; ///< 压缩图像订阅者
@@ -178,6 +189,11 @@ private:
     double conf_threshold_;   ///< 置信度阈值
     double iou_threshold_;    ///< NMS IoU 阈值
     bool verbose_;            ///< 是否打印每帧耗时
+
+    // 检测结果保存
+    std::string save_dir_;            ///< 结果保存文件夹（空 = 不保存）
+    unsigned long frame_counter_ = 0; ///< 已处理帧计数（用于文件名编号）
+    std::ofstream results_file_;      ///< 检测结果汇总 CSV 文件流
 
     // 相机标定与坐标变换参数（默认值取自 26 赛季培训说明）
     int16_t armor_type_;              ///< 装甲板图案类型（哨兵期望输出 7）
