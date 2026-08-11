@@ -1,21 +1,14 @@
 <?xml version="1.0"?>
 <?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
 <package format="3">
-  <name>detect</name>
+  <name>aim_interfaces</name>
   <version>0.0.0</version>
-  <description>YOLOv8 装甲板检测节点：订阅图像话题，ONNX Runtime 推理，发布画框图像与检测结果</description>
+  <description>装甲板瞄准目标信息自定义消息（26赛季视觉基础培训）</description>
   <maintainer email="baimeixiaofan@gmail.com">baimi</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>
-
-  <depend>rclcpp</depend>
-  <depend>std_msgs</depend>
-  <depend>sensor_msgs</depend>
-  <depend>cv_bridge</depend>
-  <depend>OpenCV</depend>
-  <depend>aim_interfaces</depend>
 
   <exec_depend>rosidl_default_runtime</exec_depend>
 

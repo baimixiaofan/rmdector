@@ -7,4 +7,7 @@ __pycache__/
 
 # 模型权重文件（大文件，用 Git LFS 或不提交）
 src/detect/armor-4/weights/
+
+# 培训说明文档（内部资料，不提交仓库）
+src/detect/26赛季视觉基础培训说明/
 AGENTS.md

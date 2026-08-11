@@ -14,6 +14,42 @@ namespace detect
 namespace
 {
 
+/** @brief 角度制转弧度 */
+double toRadians(double deg)
+{
+    return deg * CV_PI / 180.0;
+}
+
+/** @brief 绕 X 轴的旋转矩阵（输入为弧度） */
+cv::Mat rotationX(double angle)
+{
+    const double c = std::cos(angle);
+    const double s = std::sin(angle);
+    return (cv::Mat_<double>(3, 3) << 1, 0, 0,
+                                     0, c, -s,
+                                     0, s, c);
+}
+
+/** @brief 绕 Y 轴的旋转矩阵（输入为弧度） */
+cv::Mat rotationY(double angle)
+{
+    const double c = std::cos(angle);
+    const double s = std::sin(angle);
+    return (cv::Mat_<double>(3, 3) << c, 0, s,
+                                     0, 1, 0,
+                                     -s, 0, c);
+}
+
+/** @brief 绕 Z 轴的旋转矩阵（输入为弧度） */
+cv::Mat rotationZ(double angle)
+{
+    const double c = std::cos(angle);
+    const double s = std::sin(angle);
+    return (cv::Mat_<double>(3, 3) << c, -s, 0,
+                                     s, c, 0,
+                                     0, 0, 1);
+}
+
 /**
  * @brief 模型输出中的一个候选框（640 空间坐标）
  */
@@ -106,6 +142,52 @@ DetectNode::DetectNode()
     // 类别名需与训练 data.yaml 一致，行数必须匹配模型输出（4 坐标 + 1 类别）
     class_names_ = {"armor"};
 
+    // ---- 1.5 相机标定与坐标变换参数（默认值取自 26 赛季培训说明）----
+    armor_type_ = static_cast<int16_t>(this->declare_parameter("armor_type", 7));
+    // 相机内参矩阵：fx, 0, cx; 0, fy, cy; 0, 0, 1
+    const double fx = this->declare_parameter("camera_fx", 1462.3697);
+    const double fy = this->declare_parameter("camera_fy", 1469.68385);
+    const double cx = this->declare_parameter("camera_cx", 398.59394);
+    const double cy = this->declare_parameter("camera_cy", 110.68997);
+    // 相机畸变系数：k1, k2, p1, p2, k3
+    const double k1 = this->declare_parameter("dist_k1", 0.003518);
+    const double k2 = this->declare_parameter("dist_k2", -0.311778);
+    const double p1 = this->declare_parameter("dist_p1", -0.016581);
+    const double p2 = this->declare_parameter("dist_p2", 0.023682);
+    const double k3 = this->declare_parameter("dist_k3", 0.0);
+    // 相机在机器人坐标系下的平移（米）
+    const double cam_tx = this->declare_parameter("cam_to_robot_x", 0.08);
+    const double cam_ty = this->declare_parameter("cam_to_robot_y", 0.0);
+    const double cam_tz = this->declare_parameter("cam_to_robot_z", 0.05);
+    // 相机相对机器人的旋转（角度制）
+    const double cam_roll = this->declare_parameter("cam_to_robot_roll", 0.0);
+    const double cam_pitch = this->declare_parameter("cam_to_robot_pitch", 60.0);
+    const double cam_yaw = this->declare_parameter("cam_to_robot_yaw", 20.0);
+
+    camera_matrix_ = (cv::Mat_<double>(3, 3) << fx, 0, cx,
+                                                0, fy, cy,
+                                                0, 0, 1);
+    dist_coeffs_ = (cv::Mat_<double>(1, 5) << k1, k2, p1, p2, k3);
+    cam_translation_ = cv::Point3f(static_cast<float>(cam_tx),
+                                   static_cast<float>(cam_ty),
+                                   static_cast<float>(cam_tz));
+    // 相机系→机器人系旋转矩阵：先 roll 绕 x，再 pitch 绕 y，最后 yaw 绕 z
+    cam_rotation_ = rotationZ(toRadians(cam_yaw)) *
+                    rotationY(toRadians(cam_pitch)) *
+                    rotationX(toRadians(cam_roll));
+
+    // 装甲板 3D 模型点（单位：米），坐标原点取装甲板中心：
+    //   两侧灯条中心间距 16cm -> x = ±0.08
+    //   灯条长度 8cm          -> y = ±0.04
+    //   z = 0（装甲板近似为平面）
+    // 顺序：左上、右上、右下、左下（与检测框四角顺序一一对应）
+    armor_points_ = {
+        cv::Point3f(-0.08f, 0.04f, 0.0f),   // 左上
+        cv::Point3f(0.08f, 0.04f, 0.0f),    // 右上
+        cv::Point3f(0.08f, -0.04f, 0.0f),   // 右下
+        cv::Point3f(-0.08f, -0.04f, 0.0f),  // 左下
+    };
+
     // ---- 2. 初始化 ONNX Runtime 并加载模型 ----
     ort_env_ = std::make_unique<Ort::Env>(ORT_LOGGING_LEVEL_WARNING, "detect");
 
@@ -126,9 +208,10 @@ DetectNode::DetectNode()
 
     result_pub_ = this->create_publisher<sensor_msgs::msg::Image>("/detect/image", 1);
     detection_pub_ = this->create_publisher<detect::msg::DetectionArray>("/detect/detections", 1);
+    aim_pub_ = this->create_publisher<aim_interfaces::msg::AimInfo>("/aim_target", 1);
 
     RCLCPP_INFO(this->get_logger(),
-                "检测节点已启动, 订阅 /sensor_img, 发布 /detect/image 和 /detect/detections");
+                "检测节点已启动, 订阅 /sensor_img, 发布 /detect/image、/detect/detections 和 /aim_target");
 }
 
 // ======================================================================
@@ -180,18 +263,34 @@ void DetectNode::processFrame(const cv::Mat& frame, const rclcpp::Time& stamp,
     const std::vector<Detection> detections =
         postprocess(raw_output, scale, pad_x, pad_y, frame.cols, frame.rows);
 
-    // ---- 4. 在副本上画框（不污染原图数据） ----
+    // ---- 4. 姿态解算：对置信度最高的目标解算机器人坐标系坐标 ----
+    // 本任务只关心最优目标（其余检测框仅用于显示）
+    cv::Point3f position_cam;
+    cv::Point3f position_robot;
+    const bool solved = (!detections.empty() &&
+                         solveArmorPosition(detections[0].box, position_cam));
+    if (solved) {
+        cameraToRobot(position_cam, position_robot);
+    }
+
+    // ---- 5. 在副本上画框（不污染原图数据），并打印坐标信息 ----
     cv::Mat annotated = frame.clone();
     drawBoxes(annotated, detections);
+    if (solved) {
+        drawRobotPosition(annotated, position_robot, detections[0].box);
+    }
 
-    // ---- 5. 发布画框图像 ----
+    // ---- 6. 发布画框图像 ----
     cv_bridge::CvImage cv_image(std_msgs::msg::Header(), "bgr8", annotated);
     result_pub_->publish(*cv_image.toImageMsg());
 
-    // ---- 6. 发布结构化检测结果（供下游瞄准 / 决策使用） ----
+    // ---- 7. 发布结构化检测结果（供下游瞄准 / 决策使用） ----
     publishDetectionResults(detections, stamp, frame_id);
 
-    // ---- 7. 按参数决定是否打印每帧耗时 ----
+    // ---- 8. 发布瞄准目标信息（机器人坐标系坐标 + 图案类型） ----
+    publishAimInfo(detections, solved, position_robot);
+
+    // ---- 9. 按参数决定是否打印每帧耗时 ----
     if (verbose_) {
         const long elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - start_time).count();
@@ -453,6 +552,108 @@ void DetectNode::publishDetectionResults(const std::vector<Detection>& detection
     }
 
     detection_pub_->publish(array_msg);
+}
+
+// ======================================================================
+// 姿态解算：PnP 求装甲板中心在相机坐标系下的坐标
+// ======================================================================
+bool DetectNode::solveArmorPosition(const cv::Rect& box, cv::Point3f& position_cam) const
+{
+    // ---- 1. 检测框四角作为装甲板四角的 2D 投影点 ----
+    // YOLO 检测框紧贴装甲板（含两侧灯条），四角顺序与 3D 模型点一致
+    const std::vector<cv::Point2f> image_points = {
+        cv::Point2f(box.x, box.y),                             // 左上
+        cv::Point2f(box.x + box.width, box.y),                 // 右上
+        cv::Point2f(box.x + box.width, box.y + box.height),    // 右下
+        cv::Point2f(box.x, box.y + box.height),                // 左下
+    };
+
+    // ---- 2. PnP 解算：得到装甲板中心在相机坐标系下的坐标（米）----
+    // 相机坐标系（OpenCV）：tvec = (x 右, y 下, z 前)
+    cv::Mat rvec;
+    cv::Mat tvec;
+    const bool ok = cv::solvePnP(armor_points_, image_points,
+                                 camera_matrix_, dist_coeffs_,
+                                 rvec, tvec, false, cv::SOLVEPNP_ITERATIVE);
+    if (!ok) {
+        return false;
+    }
+
+    position_cam = cv::Point3f(static_cast<float>(tvec.at<double>(0)),
+                               static_cast<float>(tvec.at<double>(1)),
+                               static_cast<float>(tvec.at<double>(2)));
+    return true;
+}
+
+// ======================================================================
+// 坐标变换：相机坐标系 -> 机器人坐标系
+// ======================================================================
+void DetectNode::cameraToRobot(const cv::Point3f& position_cam, cv::Point3f& position_robot) const
+{
+    // 相机系（x 右 y 下 z 前）先转成与机器人系对齐的坐标（x 前 y 左 z 上）：
+    //   相机 x(右) -> 机器人 -y，相机 y(下) -> 机器人 -z，相机 z(前) -> 机器人 x
+    const cv::Mat aligned = (cv::Mat_<double>(3, 1) << position_cam.z,
+                                                     -position_cam.x,
+                                                     -position_cam.y);
+
+    // 旋转 + 平移 -> 机器人坐标系
+    const cv::Mat t_robot = (cv::Mat_<double>(3, 1) << cam_translation_.x,
+                                                       cam_translation_.y,
+                                                       cam_translation_.z);
+    const cv::Mat robot = cam_rotation_ * aligned + t_robot;
+
+    position_robot = cv::Point3f(static_cast<float>(robot.at<double>(0)),
+                                 static_cast<float>(robot.at<double>(1)),
+                                 static_cast<float>(robot.at<double>(2)));
+}
+
+// ======================================================================
+// 绘制机器人坐标信息
+// ======================================================================
+void DetectNode::drawRobotPosition(cv::Mat& frame, const cv::Point3f& position_robot,
+                                   const cv::Rect& box)
+{
+    // 米 -> 毫米，显示为整数便于阅读
+    const int x_mm = static_cast<int>(std::round(position_robot.x * 1000.0));
+    const int y_mm = static_cast<int>(std::round(position_robot.y * 1000.0));
+    const int z_mm = static_cast<int>(std::round(position_robot.z * 1000.0));
+    const std::string label = "robot: (" + std::to_string(x_mm) + ", " +
+                              std::to_string(y_mm) + ", " +
+                              std::to_string(z_mm) + ") mm";
+
+    // 放在检测框上方（若与置信度标签重叠则下移一行）
+    int baseline = 0;
+    const cv::Size text_size =
+        cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+    const int label_bottom = std::max(box.y - 5, text_size.height);
+    const cv::Point text_origin(box.x, std::max(label_bottom - text_size.height - 4, text_size.height));
+
+    cv::rectangle(frame, cv::Rect(text_origin, text_size + cv::Size(4, baseline)),
+                  cv::Scalar(255, 0, 0), cv::FILLED);
+    cv::putText(frame, label, text_origin + cv::Point(2, text_size.height - 2),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(255, 255, 255), 1);
+}
+
+// ======================================================================
+// 发布瞄准目标信息：机器人坐标系坐标 + 图案类型 -> /aim_target
+// ======================================================================
+void DetectNode::publishAimInfo(const std::vector<Detection>& detections,
+                                bool solved, const cv::Point3f& position_robot)
+{
+    aim_interfaces::msg::AimInfo aim_msg;
+    aim_msg.type = armor_type_;  // 哨兵装甲板图案期望输出 7
+
+    // 只在成功解算时填充坐标，否则保持空数组（下游可据此判断无目标）
+    if (solved && !detections.empty()) {
+        // 米 -> 毫米（Int16 数组无法表示小数），四舍五入取整
+        aim_msg.coordinate = {
+            static_cast<int16_t>(std::round(position_robot.x * 1000.0)),
+            static_cast<int16_t>(std::round(position_robot.y * 1000.0)),
+            static_cast<int16_t>(std::round(position_robot.z * 1000.0)),
+        };
+    }
+
+    aim_pub_->publish(aim_msg);
 }
 
 } // namespace detect

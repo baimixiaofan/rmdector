@@ -14,6 +14,7 @@
 
 #include "detect/msg/detection.hpp"
 #include "detect/msg/detection_array.hpp"
+#include "aim_interfaces/msg/aim_info.hpp"
 
 namespace detect
 {
@@ -43,6 +44,7 @@ struct Detection
  * 输出话题:
  *   /detect/image            画了检测框的图像
  *   /detect/detections       结构化检测结果 (DetectionArray)
+ *   /aim_target              机器人坐标系下的装甲板坐标 (aim_interfaces/AimInfo)
  */
 class DetectNode : public rclcpp::Node
 {
@@ -126,11 +128,44 @@ private:
     void publishDetectionResults(const std::vector<Detection>& detections,
                                  const rclcpp::Time& stamp, const std::string& frame_id);
 
+    /**
+     * @brief 用 PnP 解算检测框对应的装甲板中心在相机坐标系下的坐标
+     * @param box           原图像素坐标系下的装甲板检测框
+     * @param position_cam  输出：装甲板中心在相机坐标系下的坐标（米，x 右 y 下 z 前）
+     * @return 解算成功返回 true
+     */
+    bool solveArmorPosition(const cv::Rect& box, cv::Point3f& position_cam) const;
+
+    /**
+     * @brief 把相机坐标系下的坐标变换到机器人坐标系
+     * @param position_cam   相机坐标系坐标（米，x 右 y 下 z 前）
+     * @param position_robot 输出：机器人坐标系坐标（米，x 前 y 左 z 上）
+     */
+    void cameraToRobot(const cv::Point3f& position_cam, cv::Point3f& position_robot) const;
+
+    /**
+     * @brief 在图像上绘制机器人坐标系下的目标坐标文本
+     * @param frame          待绘制的图像（原地修改）
+     * @param position_robot 机器人坐标系下的坐标（米）
+     * @param box            检测框（文本显示在框上方）
+     */
+    void drawRobotPosition(cv::Mat& frame, const cv::Point3f& position_robot, const cv::Rect& box);
+
+    /**
+     * @brief 发布 AimInfo 到 /aim_target（机器人坐标系下的装甲板坐标 + 图案类型）
+     * @param detections     检测结果列表（取置信度最高的一个）
+     * @param solved         本帧是否成功解算出坐标
+     * @param position_robot 解算出的机器人坐标系坐标（米）
+     */
+    void publishAimInfo(const std::vector<Detection>& detections,
+                        bool solved, const cv::Point3f& position_robot);
+
     // ROS 接口
     rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr image_sub_;             ///< 原始图像订阅者
     rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_sub_; ///< 压缩图像订阅者
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr result_pub_;               ///< 检测结果图像发布者
     rclcpp::Publisher<detect::msg::DetectionArray>::SharedPtr detection_pub_;        ///< 结构化检测结果发布者
+    rclcpp::Publisher<aim_interfaces::msg::AimInfo>::SharedPtr aim_pub_;             ///< 瞄准目标信息发布者
 
     // ONNX Runtime 会话
     std::unique_ptr<Ort::Env> ort_env_;            ///< ONNX Runtime 环境
@@ -143,6 +178,14 @@ private:
     double conf_threshold_;   ///< 置信度阈值
     double iou_threshold_;    ///< NMS IoU 阈值
     bool verbose_;            ///< 是否打印每帧耗时
+
+    // 相机标定与坐标变换参数（默认值取自 26 赛季培训说明）
+    int16_t armor_type_;              ///< 装甲板图案类型（哨兵期望输出 7）
+    cv::Mat camera_matrix_;           ///< 相机内参矩阵 3x3
+    cv::Mat dist_coeffs_;             ///< 相机畸变系数 (k1,k2,p1,p2,k3)
+    cv::Mat cam_rotation_;            ///< 相机系→机器人系旋转矩阵 3x3
+    cv::Point3f cam_translation_;     ///< 相机系→机器人系平移（米）
+    std::vector<cv::Point3f> armor_points_;  ///< 装甲板 4 个灯条角的 3D 模型点（米）
 };
 
 } // namespace detect

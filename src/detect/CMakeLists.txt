@@ -17,6 +17,7 @@ find_package(std_msgs REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
 find_package(OpenCV REQUIRED)
+find_package(aim_interfaces REQUIRED)
 
 # ---- ONNX Runtime（手动安装到 ~/onnxruntime）----
 set(ONNXRUNTIME_ROOT "$ENV{HOME}/onnxruntime")
@@ -47,6 +48,7 @@ ament_target_dependencies(
   std_msgs
   sensor_msgs
   cv_bridge
+  aim_interfaces
 )
 
 target_link_libraries(detect_node ${ONNXRUNTIME_LIB} ${OpenCV_LIBS})
@@ -84,6 +86,7 @@ ament_export_dependencies(
   sensor_msgs
   cv_bridge
   OpenCV
+  aim_interfaces
 )
 
 ament_package()
