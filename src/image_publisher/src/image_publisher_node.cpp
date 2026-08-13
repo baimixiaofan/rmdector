@@ -1,5 +1,9 @@
 #include "image_publisher/image_publisher_node.hpp"
 
+#include <ament_index_cpp/get_package_share_directory.hpp>
+
+#include <stdexcept>
+
 /**
  * @file image_publisher_node.cpp
  * @brief ROS 2 图像发布节点实现（模拟相机）
@@ -50,9 +54,9 @@ ImagePublisherNode::ImagePublisherNode()
     
     // 加载图片文件列表
     if (!loadImageFiles()) {
-        RCLCPP_ERROR(this->get_logger(), "无法加载图片文件，节点将退出");
-        rclcpp::shutdown();
-        return;
+        // 参数/文件夹错误属于配置问题：抛异常交给 main 兜底，
+        // 打印原因后退出，而不是构造出半个不可用的节点
+        throw std::runtime_error("无法加载图片文件，请检查 image_folder 参数");
     }
     
     // 预加载图像到内存（可选）
@@ -64,6 +68,10 @@ ImagePublisherNode::ImagePublisherNode()
     
     // 创建定时器：发布频率 -> 周期（ms），例如 10Hz -> 100ms
     double publish_rate = this->get_parameter("publish_rate").as_double();
+    if (publish_rate <= 0.0) {
+        // 0 或负数会除零/产生 inf，先在这里拦掉，避免定时器参数变成未定义值
+        throw std::runtime_error("publish_rate 必须大于 0");
+    }
     auto timer_period = std::chrono::milliseconds(static_cast<int>(1000.0 / publish_rate));
     timer_ = this->create_wall_timer(timer_period, std::bind(&ImagePublisherNode::publishImage, this));
     
@@ -97,10 +105,10 @@ void ImagePublisherNode::initializeParameters()
     resize_width_ = this->get_parameter("resize_width").as_int();
     resize_height_ = this->get_parameter("resize_height").as_int();
     
-    // 如果没有指定图片文件夹，使用默认路径
+    // 如果没有指定图片文件夹，使用安装后的包共享目录（images/ 随包一起安装），
+    // 不再依赖进程的当前工作目录，从任何位置启动都能找到示例图片
     if (image_folder_.empty()) {
-        // 尝试使用包内的images文件夹
-        image_folder_ = std::filesystem::current_path() / "src/image_publisher/images";
+        image_folder_ = ament_index_cpp::get_package_share_directory("image_publisher") + "/images";
         RCLCPP_INFO(this->get_logger(), "使用默认图片文件夹: %s", image_folder_.c_str());
     }
 }
@@ -256,9 +264,11 @@ void ImagePublisherNode::publishImage()
             RCLCPP_INFO(this->get_logger(), "所有图片已发布完毕（共%zu张），节点即将退出", image_files_.size());
             timer_->cancel();
             // 延迟一小段时间后退出，确保最后的消息能被发送
-            auto exit_timer = this->create_wall_timer(
+            // 注意：定时器必须保存为成员变量，若只是局部变量，
+            // 本函数返回后定时器即被销毁，退出回调永远不会触发
+            exit_timer_ = this->create_wall_timer(
                 std::chrono::milliseconds(100),
-                [this]() { rclcpp::shutdown(); }
+                []() { rclcpp::shutdown(); }
             );
             return;
         }
@@ -306,7 +316,8 @@ void ImagePublisherNode::publishImage()
             publisher_->publish(*msg);
         }
         
-        RCLCPP_INFO(this->get_logger(), "发布图片: %s [%zu/%zu]", 
+        // 发布进度改打 DEBUG：高频发布时避免日志刷屏（想看时加 --ros-args --log-level debug）
+        RCLCPP_DEBUG(this->get_logger(), "发布图片: %s [%zu/%zu]", 
                     std::filesystem::path(image_files_[current_image_index_]).filename().c_str(),
                     current_image_index_ + 1, image_files_.size());
         
@@ -353,8 +364,16 @@ void ImagePublisherNode::publishCompressedImage(const cv::Mat& image, const std_
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<image_publisher::ImagePublisherNode>();
-    rclcpp::spin(node);
+    try {
+        auto node = std::make_shared<image_publisher::ImagePublisherNode>();
+        rclcpp::spin(node);
+    } catch (const std::exception& e) {
+        // 图片文件夹不存在、参数非法等配置问题统一在这里兜底，
+        // 打印原因后正常退出，而不是带着半个节点继续跑
+        RCLCPP_ERROR(rclcpp::get_logger("image_publisher_node"), "节点启动失败: %s", e.what());
+        rclcpp::shutdown();
+        return 1;
+    }
     rclcpp::shutdown();
     return 0;
 } 

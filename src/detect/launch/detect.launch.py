@@ -47,7 +47,7 @@ def generate_launch_description():
     )
     save_dir_arg = DeclareLaunchArgument(
         'save_dir',
-        default_value='~/rmdector/detect_results',
+        default_value=os.path.expanduser('~/rmdector/detect_results'),
         description='检测结果保存文件夹（空 = 不保存）'
     )
 

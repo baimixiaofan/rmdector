@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <filesystem>
 
 namespace detect
@@ -14,6 +16,31 @@ namespace detect
 // ======================================================================
 namespace
 {
+
+/**
+ * @brief 展开路径开头的 ~（只支持 ~ 和 ~/xxx 两种形式）
+ *
+ * std::filesystem 不会展开 shell 风格的 ~：launch 或命令行直接传
+ * "~/xxx" 时，会在当前目录下创建名为 "~" 的文件夹。这里手动用
+ * HOME 环境变量替换，让路径落回用户主目录。
+ */
+std::string expandTilde(const std::string& path)
+{
+    // 不以 ~ 开头，或空路径，原样返回
+    if (path.empty() || path[0] != '~') {
+        return path;
+    }
+    const char* home = std::getenv("HOME");
+    if (home == nullptr) {
+        // 拿不到 HOME 时原样返回，避免破坏传入路径
+        return path;
+    }
+    // "~" 单独出现时就是主目录本身，否则替换掉开头的 "~"
+    if (path.size() == 1) {
+        return std::string(home);
+    }
+    return std::string(home) + path.substr(1);
+}
 
 /** @brief 角度制转弧度 */
 double toRadians(double deg)
@@ -56,10 +83,12 @@ cv::Mat rotationZ(double angle)
  */
 struct Candidate
 {
-    float cx, cy;   // 框中心坐标（letterbox 后，640 空间）
-    float w, h;     // 框宽高（640 空间）
-    float score;    // 置信度得分，范围 [0, 1]
-    int class_id;   // 类别索引
+    float cx;        // 框中心 x 坐标（letterbox 后，640 空间）
+    float cy;        // 框中心 y 坐标（letterbox 后，640 空间）
+    float w;         // 框宽（640 空间）
+    float h;         // 框高（640 空间）
+    float score;     // 置信度得分，范围 [0, 1]
+    int class_id;    // 类别索引
 };
 
 /**
@@ -132,14 +161,15 @@ DetectNode::DetectNode()
 {
     // ---- 1. 读取 ROS 参数 ----
     // 启动时可用 --ros-args -p 参数名:=值 或 launch 文件覆写默认值
-    const std::string model_path = this->declare_parameter(
+    const std::string model_path = expandTilde(this->declare_parameter(
         "model_path",
-        std::string("/home/baimi/rmdector/src/detect/armor-4/weights/best.onnx"));
+        std::string("/home/baimi/rmdector/src/detect/armor-4/weights/best.onnx")));
     conf_threshold_ = this->declare_parameter("conf_threshold", 0.25);  // 置信度过滤阈值
     iou_threshold_ = this->declare_parameter("iou_threshold", 0.45);    // NMS 去重阈值
     input_size_ = this->declare_parameter("input_size", 640);           // 模型输入边长
     verbose_ = this->declare_parameter("verbose", false);               // 是否打印每帧耗时
-    save_dir_ = this->declare_parameter("save_dir", std::string(""));   // 结果保存文件夹（空=不保存）
+    // 结果保存文件夹（空=不保存），先把 ~ 展开成用户主目录，避免在 cwd 下建出名为 ~ 的文件夹
+    save_dir_ = expandTilde(this->declare_parameter("save_dir", std::string("")));
 
     // 类别名需与训练 data.yaml 一致，行数必须匹配模型输出（4 坐标 + 1 类别）
     class_names_ = {"armor"};
@@ -356,7 +386,7 @@ cv::Mat DetectNode::letterbox(const cv::Mat& src, float& scale, int& pad_x, int&
 // ======================================================================
 void DetectNode::infer(const cv::Mat& input, std::vector<float>& output)
 {
-    // ---------- 1. 把图像改成模型认识的样子 ----------/
+    // ---------- 1. 把图像改成模型认识的样子 ----------
     // cv::dnn::blobFromImage：一步把"宽x高x3通道的 BGR 图像"变成"1张x3通道x640x640 的 float 数组"
     // 参数从右往左看：
     //   true          → 交换 B 和 R 通道（BGR 变 RGB），因为模型是按 RGB 训练的
@@ -717,8 +747,16 @@ void DetectNode::saveResults(const cv::Mat& annotated,
 int main(int argc, char** argv)
 {
     rclcpp::init(argc, argv);
-    auto node = std::make_shared<detect::DetectNode>();
-    rclcpp::spin(node);
+    try {
+        // 模型文件不存在或损坏时 Ort::Session 会抛异常，
+        // 这里兜底打印原因后正常退出，而不是留下一个晦涩的崩溃栈
+        auto node = std::make_shared<detect::DetectNode>();
+        rclcpp::spin(node);
+    } catch (const std::exception& e) {
+        RCLCPP_ERROR(rclcpp::get_logger("detect_node"), "节点启动失败: %s", e.what());
+        rclcpp::shutdown();
+        return 1;
+    }
     rclcpp::shutdown();
     return 0;
 }

@@ -80,7 +80,8 @@ private:
     // ROS发布者和定时器
     rclcpp::Publisher<sensor_msgs::msg::Image>::SharedPtr publisher_;
     rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr compressed_publisher_;
-    rclcpp::TimerBase::SharedPtr timer_;
+    rclcpp::TimerBase::SharedPtr timer_;              ///< 周期发布定时器
+    rclcpp::TimerBase::SharedPtr exit_timer_;         ///< 播完后延迟退出的一次性定时器（必须持有引用，否则回调永不触发）
     
     // 图像相关成员变量
     std::string image_folder_;                    ///< 图像文件夹路径

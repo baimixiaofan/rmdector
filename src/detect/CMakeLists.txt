@@ -60,7 +60,9 @@ set_target_properties(detect_node PROPERTIES
 )
 
 # 生成自定义消息的 C++ 接口
-rosidl_target_interfaces(detect_node ${PROJECT_NAME} "rosidl_typesupport_cpp")
+# （旧写法 rosidl_target_interfaces 已弃用，用 get_typesupport_target 替代）
+rosidl_get_typesupport_target(cpp_typesupport_target ${PROJECT_NAME} "rosidl_typesupport_cpp")
+target_link_libraries(detect_node "${cpp_typesupport_target}")
 
 # ---- 安装 ----
 install(TARGETS detect_node

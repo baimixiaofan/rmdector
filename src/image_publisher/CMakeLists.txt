@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # 查找依赖包
 find_package(ament_cmake REQUIRED)
+find_package(ament_index_cpp REQUIRED)
 find_package(rclcpp REQUIRED)
 find_package(sensor_msgs REQUIRED)
 find_package(cv_bridge REQUIRED)
@@ -34,6 +35,7 @@ target_compile_features(image_publisher_node PUBLIC c_std_99 cxx_std_17)
 # 链接依赖库
 ament_target_dependencies(
   image_publisher_node
+  ament_index_cpp
   rclcpp
   sensor_msgs
   cv_bridge
